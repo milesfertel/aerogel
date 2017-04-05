@@ -29,16 +29,52 @@ var
 	P       = require('p-promise')
 	;
 
+// Relevant Constants
+
+// Conversion factor constants to map the angle of the hand
+// to the correct quadcopter angle
+var EXTREME_FACTOR = -100/3.14;
+var STANDARD_FACTOR = -70/3.14;
+
+// Yaw heuristics that make flying easier
+var YAW_FACTOR = 150/0.8;
+var YAW_HIGH = 40;
+var YAW_LOW = -40;
+// Yaw manipulation factors scale down yaw for better control
+var EX_MAN = 4;
+var STD_MAN = 10;
+var EX_YAW_MAN = 1.5;
+var STD_YAW_MAN = 8;
+
+// Absolute pitch and rolls greater than 10 are considered extreme gestures
+var FAST_HIGH = 10;
+var FAST_LOW = -10;
+
+// Thrust constants
+var MIN_THRUST = 10001;
+var HAND_LOW = 150;
+
+// Hand is facing left
+var HAND_LEFT = -0.8;
+
+// Debug status
+// If you want to be able to bail quickly with SIGINT, turn this on.
+var DEBUG = 0;
+
 // Allow for quitting with Control C
 function killme()
 {
-	throw new Error();
+	console.log("Caught interrupt signal");
+	process.exit();
 }
 
-process.on('SIGINT', killme);
+if (DEBUG)
+	process.on('SIGINT', bail);
+else
+	process.on('SIGINT', killme);
+
 var driver = new Aerogel.CrazyDriver();
 var copter = new Aerogel.Copter(driver);
-process.on('SIGINT', bail);
 
 // Declare a Bool for the mode of the flight program
 var extreme = new Boolean(false);
@@ -67,18 +103,16 @@ function bail()
 // Function called each time a frame event occurs
 function leaploop(frame)
 {
-	// Declare a variable called hands to be counted later
+	// Store information about the hands in the frame
 	var hands = frame.hands;
-	// Change Thrust
+
+	// Update the motion of the quadcopter each frame
 	changethrust(frame);
-	// Change Pitch
 	changepitch(frame);
-	// Change Yaw
 	changeroll(frame);
-	// Hard coding extra easiness for Demo purposes, yaw won't change unless in extreme mode
-	if (extreme == true)
-		changeyaw(frame);
-	// If a gesture is made, call the function that handles that gesture
+	changeyaw(frame);
+
+	// Gesture handling
 	if (frame.gestures.length > 0)
 	{
 		var g = frame.gestures[0];
@@ -119,10 +153,7 @@ controller.on('frame', leaploop);
 // Change the flight mode from extreme to normal or vice versa
 function chmod()
 {
-	if (extreme == false)
-		extreme = true;
-	else
-		extreme = false;
+	extreme = !extreme;
 }
 
 // Set variables to protect from over-recognition
@@ -134,7 +165,7 @@ function handleCircle(circle, frame)
 {
 	var state = copter.copterStates.currentState();
 	var now = circle.progress;
-	// If now is less than last circle, reset last circle to 0
+
 	if (now < lastCircle)
 		lastCircle = 0;
 	// If less than 2 circles are made, ignore the gesture
@@ -151,23 +182,22 @@ function handleCircle(circle, frame)
 // Called when a ScreenTap gesture is seen
 function handleScreenTap(screenTap, frame)
 {
-	//Declare variable to determine if the type of gesture we want is made
+	// Relevant frame vars
 	var hand = frame.hands[0];
 	var normal = hand.palmNormal;
 	var now = Date.now();
 
 	var state = copter.copterStates.currentState();
+
 	// If we're not on the ground or we just did a tap, ignore
 	if (state !== 'waiting' || (now - lastTap < 1000))
 		return 'ignored';
 
-	// Declare string of which mode we're changing to
-	if (extreme == true)
-		var mode = 'normal';
-	else
-		var mode = 'extreme';
-	// If palm is facing left, change mode and log in console.
-	if (normal[0] < -0.8)
+	// What's the new mode?
+	var mode = extreme ? 'normal' : 'extreme';
+
+	// Only change mode if the hand is facing the correct direction
+	if (normal[0] < HAND_LEFT)
 	{
 		lastTap = Date.now();
 		console.log('Mode Changed:', mode);
@@ -177,116 +207,106 @@ function handleScreenTap(screenTap, frame)
 
 function changethrust(frame)
 {
-	// Declare a variable of the copters current thrust
-	var thrusty = copter.getThrust();
-	// If one hand is in the frame, take the y component of its position and multiply by the scaling factor to set a thrust
+	// Current thrust
+	var old_thrust = copter.getThrust();
+
 	if (frame.hands.length == 1)
 	{
 		var hand = frame.hands[0];
-		var position = hand.palmPosition[1];
-		if (position < 150)
-			thrust = 10001;
-		var thrust = (position * 133);
+		var height = hand.palmPosition[1];
+		// If the hand is too low, set a base thrust
+		if (position < HAND_LOW)
+			thrust = MIN_THRUST;
+		var thrust = (height * THRUST_FACTOR);
 		return copter.setThrust(thrust);
 	}
-	// else thrust doesn't change
 	else
-		return copter.setThrust(thrusty)
+		return copter.setThrust(old_thrust)
 }
 
 function changepitch(frame)
 {
-	// Declare a variable of the copters current pitch
-	var pitchy = copter.getPitch();
-	// If one hand is in the frame
+	// Current pitch
+	var old_pitch = copter.getPitch();
+
+	// Make sure only one hand is in the frame
 	if (frame.hands.length == 1)
 	{
-		// Declare the hand object
+		// Get the frame's hand object
 		var hand = frame.hands[0];
-		// Set pitch dependent on if its extreme or not
-		if (extreme == true)
-			var pitch = (hand.pitch() * (-100/3.14));
-		else
-			var pitch = (hand.pitch() * (-70/3.14));
-		return copter.setPitch(pitch);		
+		// Set pitch dependent on mdoe
+		var pitch = extreme ? (hand.pitch() * EXTREME_FACTOR) :
+					(hand.pitch() * STANDARD_FACTOR);
+
+		return copter.setPitch(pitch);
 	}
-	// else pitch stays the same
 	else
-		return copter.setPitch(pitchy);
+		return copter.setPitch(old_pitch);
 }
 
 function changeroll(frame)
 {
-	// Declare a variable of the copters current roll
-	var rolly = copter.getRoll();
-	// If one hand is in the frame
+	// Current roll
+	var old_roll = copter.getRoll();
+
+	// Make sure only one hand is in the frame
 	if (frame.hands.length == 1)
 	{
-		// Declare the hand object
+		// Get the frame's hand object
 		var hand = frame.hands[0];
-		// Set pitch dependent on if its extreme or not
-		if (extreme == true)
-			var roll = (hand.roll() * (-100/3.14));
-		else
-			var roll = (hand.roll() * (-70/3.14));
-		return copter.setRoll(roll);		
+
+		// Set roll dependent on mode
+		var roll = extreme ? (hand.roll() * EXTREME_FACTOR) :
+					(hand.roll() * STANDARD_FACTOR);
+		return copter.setRoll(roll);
 	}
-	// else pitch stays the same	
 	else
-		return copter.setRoll(rolly);
-}
-function changeyaw(frame)
-{
-	// Declare a variable of the copters current roll
-	var yawy = copter.getYaw();
-	// If one hand is in the frame
-	if (frame.hands.length == 1)
-	{
-		// Declare the hand object
-		var hand = frame.hands[0];
-		// Set variable of hand yaw
-		var yaw = (hand.yaw() * (150/(0.8)));
-		// Set pitch and roll values for use in later if statement
-		if (extreme == true)
-		{
-			var pitch = (hand.pitch() * (-100/3.14));
-	 		var roll = (hand.roll() * (100/3.14));			
-		}
-		else
-		{
-			var pitch = (hand.pitch() * (-70/3.14));
-	 		var roll = (hand.roll() * (70/3.14));			
-		}
-		// If we are moving strong in one direction, remove the extra variation of yaw
-		if (pitch > 10 || roll > 10 || pitch < -10 || roll < -10)
-			yaw = 0;
-		// Declare a switch case for the yaw value
-		switch (extreme){
-			case true:
-				if (yaw < 40 && yaw > -40)
-				{
-					yaw /= 4;
-				}
-				else
-					yaw /= 1.5;
-				break;
-			case false:
-				if (yaw < 40 && yaw > -40)
-				{
-					yaw /= 10;
-				}
-				else
-					yaw /= 8;
-				break;		  	
-		}
-		return copter.setYaw(yaw);		
-	}
-	// Else Yaw stays the same. 
-	else
-		return copter.setYaw(yawy);
+		return copter.setRoll(old_roll);
 }
 
-// Included takeoff function
+function changeyaw(frame)
+{
+	// Current roll
+	var old_yaw = copter.getYaw();
+
+	// Make sure only one hand is in the frame
+	if (frame.hands.length == 1)
+	{
+		// Grab the hand object
+		var hand = frame.hands[0];
+
+		// Set variable of hand yaw
+		var yaw = (hand.yaw() * YAW_FACTOR);
+
+		// Set pitch and roll by standard convention
+		var pitch = extreme ? (hand.pitch() * EXTREME_FACTOR) :
+					(hand.pitch() * STANDARD_FACTOR);
+		var roll = extreme ? (hand.roll() * EXTREME_FACTOR) :
+					(hand.roll() * STANDARD_FACTOR);
+
+		/*
+		 * If we are moving quickly in one direction, remove the extra
+		 * variation of yaw. Could create a function for this check,
+		 * but it's such a yaw specific optimization that it wouldn't make much sense.
+		 */
+		if (pitch > FAST_HI || roll > FAST_HI || pitch < FAST_LO || roll < FAST_LO) {
+			yaw = 0;
+			return copter.setYaw(yaw);
+		}
+
+		// Manipulate the yaw more depending on the nature of the gesture
+		// i.e if it seems yaw isn't the goal of the gesture, use less
+		if (yaw < YAW_HIGH && yaw > YAW_LOW)
+			yaw /= extreme ? EX_MAN : STD_MAN;
+		else
+			yaw /= extreme ? EX_YAW_MAN : STD_YAW_MAN;
+
+		return copter.setYaw(yaw);
+	}
+	else
+		return copter.setYaw(old_yaw);
+}
+
 function takeoff()
 {
 	console.log("takeoff");
@@ -297,7 +317,6 @@ function takeoff()
 	});
 }
 
-// Included land function
 var land = function()
 {
 	copter.land()
@@ -314,7 +333,6 @@ var land = function()
 	.done();
 }
 
-// Instructions to connect to the quadcopter by Aerogel
 driver.findCopters()
 .then(function(copters)
 {
